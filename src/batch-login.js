@@ -4,6 +4,8 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { spawn } = require('node:child_process');
 const crypto = require('node:crypto');
+const http = require('node:http');
+const https = require('node:https');
 const XLSX = require('xlsx');
 const {
   createBrowserBlockedTracker,
@@ -48,6 +50,9 @@ function parseArgs(argv) {
     browserBlockedRetry: true,
     reuseGoodBrowser: true,
     reuseWrongPasswordLimit: 3,
+    proxyRefreshUrl: '',
+    proxyRefreshWait: 5,
+    proxyRefreshOnFail: false,
   };
 
   for (let index = 0; index < argv.length; index += 1) {
@@ -141,6 +146,20 @@ function parseArgs(argv) {
       index += 1;
     } else if (item.startsWith('--reuse-wrong-password-limit=')) {
       args.reuseWrongPasswordLimit = Math.max(1, Number(item.slice('--reuse-wrong-password-limit='.length)) || args.reuseWrongPasswordLimit);
+    } else if (item === '--proxy-refresh-url' && next) {
+      args.proxyRefreshUrl = next;
+      index += 1;
+    } else if (item.startsWith('--proxy-refresh-url=')) {
+      args.proxyRefreshUrl = item.slice('--proxy-refresh-url='.length);
+    } else if (item === '--proxy-refresh-wait' && next) {
+      args.proxyRefreshWait = Math.max(0, Number(next) || args.proxyRefreshWait);
+      index += 1;
+    } else if (item.startsWith('--proxy-refresh-wait=')) {
+      args.proxyRefreshWait = Math.max(0, Number(item.slice('--proxy-refresh-wait='.length)) || args.proxyRefreshWait);
+    } else if (item === '--proxy-refresh-on-fail') {
+      args.proxyRefreshOnFail = true;
+    } else if (item === '--no-proxy-refresh-on-fail') {
+      args.proxyRefreshOnFail = false;
     }
   }
 
@@ -171,6 +190,52 @@ function pick(list, seed) {
 
 function randomToken() {
   return crypto.randomBytes(6).toString('hex');
+}
+
+function sleep(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+function httpGetText(url, timeoutMs = 30000, redirectsLeft = 3) {
+  return new Promise((resolve, reject) => {
+    const parsed = new URL(url);
+    const client = parsed.protocol === 'https:' ? https : http;
+    const request = client.get(parsed, response => {
+      const location = response.headers.location;
+      if (location && response.statusCode >= 300 && response.statusCode < 400 && redirectsLeft > 0) {
+        response.resume();
+        resolve(httpGetText(new URL(location, parsed).toString(), timeoutMs, redirectsLeft - 1));
+        return;
+      }
+      let body = '';
+      response.setEncoding('utf8');
+      response.on('data', chunk => {
+        body += chunk;
+        if (body.length > 2000) body = body.slice(0, 2000);
+      });
+      response.on('end', () => {
+        if (response.statusCode < 200 || response.statusCode >= 300) {
+          reject(new Error(`HTTP ${response.statusCode}: ${body.slice(0, 300)}`));
+          return;
+        }
+        resolve(body);
+      });
+    });
+    request.setTimeout(timeoutMs, () => request.destroy(new Error(`timeout ${timeoutMs}ms`)));
+    request.on('error', reject);
+  });
+}
+
+async function refreshProxyIp(options, reason) {
+  if (!options.proxyRefreshUrl) return false;
+  console.log(`[Batch] refresh proxy IP start (${reason})`);
+  const body = await httpGetText(options.proxyRefreshUrl);
+  console.log(`[Batch] refresh proxy IP done (${reason}): ${body.slice(0, 300).replace(/\s+/g, ' ') || 'empty response'}`);
+  if (options.proxyRefreshWait > 0) {
+    console.log(`[Batch] wait ${options.proxyRefreshWait}s after proxy refresh`);
+    await sleep(options.proxyRefreshWait * 1000);
+  }
+  return true;
 }
 
 function generateWindowsUserAgent(seedInput) {
@@ -588,6 +653,8 @@ async function main() {
   console.log(`[Batch] concurrency: ${options.concurrency}`);
   console.log(`[Batch] browser_blocked limit: ${options.browserBlockedLimit}`);
   console.log(`[Batch] browser_blocked retry: ${options.browserBlockedRetry ? 'enabled' : 'disabled'}`);
+  console.log(`[Batch] proxy refresh on fail: ${options.proxyRefreshUrl && options.proxyRefreshOnFail ? 'enabled' : 'disabled'}`);
+  if (options.proxyRefreshUrl) console.log(`[Batch] proxy refresh wait: ${options.proxyRefreshWait}s`);
   console.log(`[Batch] reuse good browser: ${isReusableBrowserEligible(options) ? 'enabled' : 'disabled'}`);
   if (isReusableBrowserEligible(options)) {
     console.log(`[Batch] reusable browser wrong-password limit: ${options.reuseWrongPasswordLimit}`);
@@ -624,6 +691,15 @@ async function main() {
     return writeChain;
   };
   let lastGoodProxy = '';
+  let proxyRefreshChain = Promise.resolve();
+  const refreshProxyForFail = reason => {
+    if (!options.proxyRefreshUrl || !options.proxyRefreshOnFail) return Promise.resolve(false);
+    proxyRefreshChain = proxyRefreshChain.then(() => refreshProxyIp(options, reason)).catch(error => {
+      console.log(`[Batch] refresh proxy IP failed (${reason}): ${error.message}`);
+      return false;
+    });
+    return proxyRefreshChain;
+  };
 
   const workerCount = Math.min(options.concurrency, queue.length);
   const runWorker = async workerIndex => {
@@ -668,6 +744,23 @@ async function main() {
         } else {
           result = await runAccount({ ...row, userAgent, environmentId }, options);
         }
+      if (result.networkOpenFailed && options.proxyRefreshUrl && options.proxyRefreshOnFail) {
+        const retryEnvironmentId = randomToken();
+        finalUserAgent = options.randomUserAgent
+          ? generateWindowsUserAgent(`${row.email}|${row.rowNumber}|${finalProxy}|${options.runId}|network_refresh|${retryEnvironmentId}`)
+          : userAgent;
+        console.log(`[Batch] row ${row.rowNumber} network failed, refresh proxy IP and retry once with same SOCKS5`);
+        await writeExcel(() => {
+          setCell(sheet, row.rowNumber, 'D', '网络打开失败，刷新代理 IP 后重试中');
+          setCell(sheet, row.rowNumber, 'E', new Date().toLocaleString('zh-CN', { hour12: false }));
+          setCell(sheet, row.rowNumber, 'F', finalUserAgent || 'browser default');
+          setCell(sheet, row.rowNumber, 'G', '');
+        });
+        await closeReusableSession(reusableSession, options, 'network failed before proxy refresh');
+        reusableSession = null;
+        await refreshProxyForFail(`row ${row.rowNumber} network failed`);
+        result = await runAccount({ ...row, proxy: finalProxy, userAgent: finalUserAgent, environmentId: retryEnvironmentId }, { ...options, freshProfile: true });
+      }
       if (result.networkOpenFailed && lastGoodProxy && lastGoodProxy !== rowProxy) {
         const retryEnvironmentId = randomToken();
         finalProxy = lastGoodProxy;
@@ -689,13 +782,20 @@ async function main() {
       if (result.browserBlocked && options.browserBlockedRetry) {
         const retryEnvironmentId = randomToken();
         finalUserAgent = generateWindowsUserAgent(`${userAgentSeed}|browser_blocked_retry|${retryEnvironmentId}`);
-        console.log(`[Batch] row ${row.rowNumber} browser_blocked reached ${options.browserBlockedLimit}, retry once with new UA: ${finalUserAgent}`);
+        if (options.proxyRefreshUrl && options.proxyRefreshOnFail) {
+          console.log(`[Batch] row ${row.rowNumber} browser_blocked reached ${options.browserBlockedLimit}, refresh proxy IP and retry once with new UA: ${finalUserAgent}`);
+        } else {
+          console.log(`[Batch] row ${row.rowNumber} browser_blocked reached ${options.browserBlockedLimit}, retry once with new UA: ${finalUserAgent}`);
+        }
         await writeExcel(() => {
-          setCell(sheet, row.rowNumber, 'D', 'browser_blocked，换新 UA 重试中');
+          setCell(sheet, row.rowNumber, 'D', options.proxyRefreshUrl && options.proxyRefreshOnFail ? 'browser_blocked，刷新代理 IP 并换新 UA 重试中' : 'browser_blocked，换新 UA 重试中');
           setCell(sheet, row.rowNumber, 'E', new Date().toLocaleString('zh-CN', { hour12: false }));
           setCell(sheet, row.rowNumber, 'F', finalUserAgent);
           setCell(sheet, row.rowNumber, 'G', '');
         });
+        await closeReusableSession(reusableSession, options, 'browser_blocked before proxy refresh');
+        reusableSession = null;
+        await refreshProxyForFail(`row ${row.rowNumber} browser_blocked`);
         result = await runAccount({ ...row, proxy: finalProxy, userAgent: finalUserAgent, environmentId: retryEnvironmentId }, { ...options, freshProfile: true, randomUserAgent: true });
         if (result.browserBlocked) {
           let safeProxy = noBrowserBlockedProxyPool.next(finalProxy) || (lastGoodProxy !== finalProxy ? lastGoodProxy : '');
