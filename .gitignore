@@ -1,0 +1,29 @@
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.pnpm-debug.log*
+
+# Runtime browser profiles/cache
+.idme-profile/
+.idme-profile*/
+.idme-*/
+profile*/
+profiles/
+cache/
+
+# Uploaded/runtime account files
+uploads/
+*.xlsx
+~$*.xlsx
+
+# Local environment/secrets
+.env
+.env.*
+*.local
+
+# OS/editor files
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

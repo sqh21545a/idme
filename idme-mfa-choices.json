@@ -1,0 +1,35 @@
+{
+  "recordedAt": "2026-05-08T00:29:15.174Z",
+  "choices": [
+    {
+      "index": 0,
+      "id": "multifactor_delivery_text",
+      "name": "multifactor[delivery]",
+      "value": "text",
+      "checked": true,
+      "label": "Text me",
+      "description": "",
+      "visible": true
+    },
+    {
+      "index": 1,
+      "id": "multifactor_delivery_voice",
+      "name": "multifactor[delivery]",
+      "value": "voice",
+      "checked": false,
+      "label": "Call me",
+      "description": "",
+      "visible": true
+    },
+    {
+      "index": 2,
+      "id": "0d05920f323c4d1ea3c37c42e56ceaee",
+      "name": "multifactor[setup]",
+      "value": "0d05920f323c4d1ea3c37c42e56ceaee",
+      "checked": true,
+      "label": "(***) ***-*694",
+      "description": "Receive the code at your number ending in 694",
+      "visible": true
+    }
+  ]
+}

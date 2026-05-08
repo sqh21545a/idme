@@ -1,0 +1,21 @@
+{
+  "name": "idme-playwright-cloakbrowser",
+  "version": "0.1.0",
+  "private": true,
+  "description": "IDme automation scaffold using Playwright and CloakBrowser.",
+  "type": "commonjs",
+  "scripts": {
+    "start": "node src/idme.js",
+    "web": "node src/web-ui.js",
+    "batch": "node src/batch-login.js",
+    "template": "node src/create-excel-template.js",
+    "check": "node --check src/idme.js && node --check src/web-ui.js && node --check src/batch-login.js && node --check src/create-excel-template.js"
+  },
+  "dependencies": {
+    "cloakbrowser": "file:../playwright-cli-main/playwright-cli-main/skills/CloakBrowser-main/CloakBrowser-main/js",
+    "mmdb-lib": "^3.0.2",
+    "playwright": "1.60.0-alpha-1777575331000",
+    "tar": "^7.5.14",
+    "xlsx": "^0.18.5"
+  }
+}
