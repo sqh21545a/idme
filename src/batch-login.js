@@ -19,6 +19,8 @@ const {
   clickContinue,
   clickSignIn,
   waitForLoginReady,
+  isAccessDeniedTitle,
+  isIpProblemTitle,
 } = require('./idme');
 
 const DEFAULT_URL = 'https://api.id.me/en/session/new';
@@ -336,10 +338,16 @@ function classifyOutput(output, exitCode, signal, timedOut) {
 
   if (timedOut) return { success: false, status: '登录失败：超时', mfaLabel: '' };
   if (exitCode === 12 || /browser_blocked_limit_reached|BROWSER_BLOCKED_LIMIT_REACHED/i.test(output)) {
-    return { success: false, status: '登录失败：browser_blocked，疑似 IP 问题', mfaLabel: '', browserBlocked: true };
+    const accessDenied = /Access denied \| www\.id\.me/i.test(output);
+    const somethingWrong = /Something isn't right - ID\.me/i.test(output);
+    const label = accessDenied ? 'Access denied' : somethingWrong ? "Something isn't right" : 'browser_blocked';
+    return { success: false, status: `登录失败：${label}，疑似 IP 问题`, mfaLabel: '', browserBlocked: true };
   }
   if (/entry goto failed \d+\/\d+:.*ERR_|direct login goto failed \d+\/\d+:.*ERR_|page\.goto: net::ERR_/i.test(output)) {
     return { success: false, status: '登录失败：网络打开失败，已自动重试仍失败', mfaLabel: '', networkOpenFailed: true };
+  }
+  if (/Something isn't right - ID\.me/i.test(output) && /password input not found|Continue submit not found|url after email Continue: https:\/\/api\.id\.me\/en\/session\/identify/i.test(output)) {
+    return { success: false, status: "登录失败：Something isn't right，疑似 IP 问题", mfaLabel: '', browserBlocked: true };
   }
   if (/\[IDme\] password rejected: session page after password Continue/i.test(output)) {
     return { success: false, status: '登录失败：密码错误', mfaLabel: '', passwordWrong: true };
@@ -497,7 +505,8 @@ async function runAccountInReusableBrowser(session, row, options, workerIndex) {
       console.log(`[IDme] title after ${continueLabel}: ${await page.title().catch(() => '')}`);
       console.log(`[IDme] url after ${continueLabel}: ${page.url()}`);
 
-      const blockedAfterEmail = /\/message\/browser_blocked/i.test(continueResult.afterUrl || continueResult.url || page.url());
+      const titleAfterEmail = await page.title().catch(() => '');
+      const blockedAfterEmail = /\/message\/browser_blocked/i.test(continueResult.afterUrl || continueResult.url || page.url()) || isIpProblemTitle(titleAfterEmail);
       if (!blockedAfterEmail) {
         await checkBrowserBlocked(page, session.browserBlockedTracker, `after ${continueLabel}`);
         break;
@@ -514,7 +523,10 @@ async function runAccountInReusableBrowser(session, row, options, workerIndex) {
 
     const passwordResult = await fillPassword(page, row.password);
     console.log(`[IDme] fill password: ${JSON.stringify(passwordResult)}`);
-    if (!passwordResult.success) throw new Error(`Password fill failed: ${passwordResult.error || 'unknown'}`);
+    if (!passwordResult.success) {
+      await checkBrowserBlocked(page, session.browserBlockedTracker, 'password input not found');
+      throw new Error(`Password fill failed: ${passwordResult.error || 'unknown'}`);
+    }
     const passwordContinueResult = await clickContinue(page);
     console.log(`[IDme] click Continue after password: ${JSON.stringify(passwordContinueResult)}`);
     console.log(`[IDme] title after password Continue: ${await page.title().catch(() => '')}`);
@@ -544,7 +556,10 @@ async function runAccountInReusableBrowser(session, row, options, workerIndex) {
   } catch (error) {
     const message = error && error.stack ? error.stack : String(error);
     if (/BROWSER_BLOCKED_LIMIT_REACHED/i.test(message)) {
-      return { success: false, status: '登录失败：browser_blocked，疑似 IP 问题', mfaLabel: '', browserBlocked: true, keepReusableBrowser: false };
+      const accessDenied = /Access denied \| www\.id\.me/i.test(message);
+      const somethingWrong = /Something isn't right - ID\.me/i.test(message);
+      const label = accessDenied ? 'Access denied' : somethingWrong ? "Something isn't right" : 'browser_blocked';
+      return { success: false, status: `登录失败：${label}，疑似 IP 问题`, mfaLabel: '', browserBlocked: true, keepReusableBrowser: false };
     }
     return { success: false, status: `登录失败：复用浏览器异常 ${error.message || error}`, mfaLabel: '', keepReusableBrowser: false };
   }
@@ -734,15 +749,23 @@ async function main() {
         let finalUserAgent = userAgent;
         let finalProxy = rowProxy;
         let result;
-        if (isReusableBrowserEligible(options)) {
-          reusableSession = await ensureReusableSession(reusableSession, row, options, workerIndex, rowProxy, userAgent);
-          result = await runAccountInReusableBrowser(reusableSession, { ...row, userAgent, environmentId }, options, workerIndex);
-          if (!result.keepReusableBrowser) {
-            await closeReusableSession(reusableSession, options, result.success ? 'success MFA' : result.browserBlocked ? 'browser_blocked' : 'not reusable result');
-            reusableSession = null;
+        try {
+          if (isReusableBrowserEligible(options)) {
+            reusableSession = await ensureReusableSession(reusableSession, row, options, workerIndex, rowProxy, userAgent);
+            result = await runAccountInReusableBrowser(reusableSession, { ...row, userAgent, environmentId }, options, workerIndex);
+            if (!result.keepReusableBrowser) {
+              await closeReusableSession(reusableSession, options, result.success ? 'success MFA' : result.browserBlocked ? 'browser_blocked' : 'not reusable result');
+              reusableSession = null;
+            }
+          } else {
+            result = await runAccount({ ...row, userAgent, environmentId }, options);
           }
-        } else {
-          result = await runAccount({ ...row, userAgent, environmentId }, options);
+        } catch (error) {
+          const message = error && error.stack ? error.stack : String(error);
+          console.log(`[Batch] row ${row.rowNumber} unexpected error, skip and continue: ${message}`);
+          await closeReusableSession(reusableSession, options, 'unexpected row error');
+          reusableSession = null;
+          result = { success: false, status: `登录失败：运行异常 ${error.message || error}，已跳过继续下一行`, mfaLabel: '' };
         }
       if (result.networkOpenFailed && options.proxyRefreshUrl && options.proxyRefreshOnFail) {
         const retryEnvironmentId = randomToken();

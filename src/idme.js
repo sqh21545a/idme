@@ -98,13 +98,26 @@ function createBrowserBlockedTracker(limit) {
   };
 }
 
+function isAccessDeniedTitle(title) {
+  return String(title || '').trim() === 'Access denied | www.id.me';
+}
+
+function isIpProblemTitle(title) {
+  return isAccessDeniedTitle(title) || String(title || '').trim() === "Something isn't right - ID.me";
+}
+
 async function checkBrowserBlocked(page, tracker, where) {
   const url = page.url();
-  const blocked = /\/message\/browser_blocked/i.test(url);
-  if (!blocked) return false;
+  const title = await page.title().catch(() => '');
+  const browserBlockedUrl = /\/message\/browser_blocked/i.test(url);
+  const ipProblemTitle = isIpProblemTitle(title);
+  if (!browserBlockedUrl && !ipProblemTitle) return false;
 
   tracker.count += 1;
-  console.log(`[IDme] browser_blocked detected ${tracker.count}/${tracker.limit} at ${where}: ${url}`);
+  console.log(`[IDme] browser_blocked/ip_problem detected ${tracker.count}/${tracker.limit} at ${where}: title=${title || '(empty title)'} url=${url}`);
+  if (ipProblemTitle) {
+    throw new Error(`BROWSER_BLOCKED_LIMIT_REACHED at ${where}: ip problem title=${title} url=${url}`);
+  }
   if (tracker.count >= tracker.limit) {
     throw new Error(`BROWSER_BLOCKED_LIMIT_REACHED at ${where}: ${url}`);
   }
@@ -418,15 +431,16 @@ async function waitForLoginReady(page, timeoutMs = 120000, browserBlockedTracker
     const waitingTitle = /^(just a moment|please wait)/i.test(title.trim());
     const waitingUrl = /\/oauth\/authorize|qitrt=Safetynet/i.test(url);
     const blockedUrl = /\/message\/browser_blocked/i.test(url);
-    if (blockedUrl) await checkBrowserBlocked(page, browserBlockedTracker, 'waitForLoginReady');
+    const ipProblemTitle = isIpProblemTitle(title);
+    if (blockedUrl || ipProblemTitle) await checkBrowserBlocked(page, browserBlockedTracker, 'waitForLoginReady');
     const now = Date.now();
 
     if (now - lastLogAt > 5000) {
-      console.log(`[IDme] waiting for login ready: title=${title || '(empty title)'} url=${url} waitingTitle=${waitingTitle} waitingUrl=${waitingUrl} browserBlocked=${blockedUrl}`);
+      console.log(`[IDme] waiting for login ready: title=${title || '(empty title)'} url=${url} waitingTitle=${waitingTitle} waitingUrl=${waitingUrl} browserBlocked=${blockedUrl} ipProblemTitle=${ipProblemTitle}`);
       lastLogAt = now;
     }
 
-    await page.waitForTimeout(blockedUrl ? 2000 : 3000);
+    await page.waitForTimeout((blockedUrl || ipProblemTitle) ? 2000 : 3000);
     await page.waitForLoadState('networkidle', { timeout: 10000 }).catch(() => {});
   }
 
@@ -527,7 +541,8 @@ async function main() {
       console.log(`[IDme] title after ${label}: ${await page.title().catch(() => '')}`);
       console.log(`[IDme] url after ${label}: ${page.url()}`);
 
-      const blockedAfterEmail = /\/message\/browser_blocked/i.test(continueResult.afterUrl || continueResult.url || page.url());
+      const titleAfterEmail = await page.title().catch(() => '');
+      const blockedAfterEmail = /\/message\/browser_blocked/i.test(continueResult.afterUrl || continueResult.url || page.url()) || isIpProblemTitle(titleAfterEmail);
       if (!blockedAfterEmail) {
         await checkBrowserBlocked(page, browserBlockedTracker, `after ${label}`);
         break;
@@ -551,6 +566,7 @@ async function main() {
     console.log(`[IDme] visible inputs before password fill: ${JSON.stringify(passwordInputsBeforeFill)}`);
     const passwordResult = await fillPassword(page, args.password);
     console.log(`[IDme] fill password: ${JSON.stringify(passwordResult)}`);
+    if (!passwordResult.success) await checkBrowserBlocked(page, browserBlockedTracker, 'password input not found');
     const passwordInputsAfterFill = await inspectEmailInputs(page).catch(error => [{ error: error.message }]);
     console.log(`[IDme] visible inputs after password fill: ${JSON.stringify(passwordInputsAfterFill)}`);
     const continueResult = await clickContinue(page);
@@ -605,6 +621,8 @@ if (require.main === module) {
 module.exports = {
   createBrowserBlockedTracker,
   checkBrowserBlocked,
+  isAccessDeniedTitle,
+  isIpProblemTitle,
   gotoWithRetry,
   launchCloakBrowser,
   fillEmail,
