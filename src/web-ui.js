@@ -229,6 +229,9 @@ function startBatchAutomation(options = {}) {
   if (options.concurrency) args.push('--concurrency', String(options.concurrency));
   if (options.browserBlockedLimit) args.push('--browser-blocked-limit', String(options.browserBlockedLimit));
   args.push(options.browserBlockedRetry === false ? '--no-browser-blocked-retry' : '--browser-blocked-retry');
+  if (options.proxyRefreshUrl) args.push('--proxy-refresh-url', String(options.proxyRefreshUrl));
+  if (options.proxyRefreshWait !== undefined && options.proxyRefreshWait !== '') args.push('--proxy-refresh-wait', String(options.proxyRefreshWait));
+  args.push(options.proxyRefreshOnFail === false ? '--no-proxy-refresh-on-fail' : '--proxy-refresh-on-fail');
   if (options.startRow) args.push('--start-row', String(options.startRow));
   if (options.endRow) args.push('--end-row', String(options.endRow));
   if (options.sheet) args.push('--sheet', String(options.sheet));

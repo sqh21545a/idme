@@ -44,6 +44,10 @@
           默认 HTTP Proxy（Excel C 列为空时才使用）
           <input name="proxy" value="http://wXYSygNq:rIj4WNT75PF12hPb@us.proxy302.com:2222" autocomplete="off">
         </label>
+        <label>
+          代理刷新 API（GET，失败时刷新 IP，可空）
+          <input name="proxyRefreshUrl" value="" autocomplete="off" placeholder="https://你的代理商刷新API">
+        </label>
         <div class="two">
           <label>
             Profile Base
@@ -74,6 +78,16 @@
             <input name="browserBlockedLimit" value="3" type="number" min="1" max="10" step="1">
           </label>
         </div>
+        <div class="two">
+          <label>
+            刷新后等待秒数
+            <input name="proxyRefreshWait" value="5" type="number" min="0" max="60" step="1">
+          </label>
+          <label>
+            代理刷新触发
+            <input value="失败时自动刷新 IP" readonly>
+          </label>
+        </div>
         <div class="checks">
           <label class="checkline"><input name="browserMode" type="radio" value="headless"> 无头运行</label>
           <label class="checkline"><input name="browserMode" type="radio" value="headed" checked> 有头运行</label>
@@ -82,6 +96,7 @@
           <label class="checkline"><input name="userAgentMode" type="radio" value="random"> 每次新 UA</label>
           <label class="checkline"><input name="userAgentMode" type="radio" value="fixed" checked> 固定 UA</label>
           <label class="checkline"><input name="browserBlockedRetry" type="checkbox" checked> browser_blocked 后换新 UA 重试一次</label>
+          <label class="checkline"><input name="proxyRefreshOnFail" type="checkbox" checked> browser_blocked / 网络失败时刷新 IP</label>
           <label class="checkline"><input name="noProxy" type="checkbox"> 禁用代理</label>
         </div>
         <div class="actions">
