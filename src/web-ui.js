@@ -19,7 +19,7 @@ function pushLog(line) {
   const text = String(line || '').replace(/\r?\n$/, '');
   if (!text) return;
   logs.push({ time: new Date().toISOString(), text });
-  if (logs.length > 1200) logs = logs.slice(-1200);
+  if (logs.length > 10000) logs = logs.slice(-10000);
 }
 
 function sendJson(res, status, data) {

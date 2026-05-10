@@ -806,7 +806,8 @@ async function main() {
     try {
       while (queue.length) {
         const row = queue.shift();
-        ensureRangeIncludes(sheet, row.rowNumber, 6);
+        try {
+          ensureRangeIncludes(sheet, row.rowNumber, 6);
 
       if (!row.email || !row.password) {
         const status = !row.email ? '登录失败：邮箱为空' : '登录失败：密码为空';
@@ -954,13 +955,38 @@ async function main() {
         setCell(sheet, row.rowNumber, 'F', finalUserAgent || 'browser default');
         setCell(sheet, row.rowNumber, 'G', result.mfaLabel || '');
         });
+        } catch (error) {
+          const message = error && error.stack ? error.stack : String(error);
+          console.log(`[Batch] worker ${workerIndex + 1} row ${row && row.rowNumber ? row.rowNumber : '(unknown)'} fatal row error, keep worker running: ${message}`);
+          if (row && row.rowNumber) {
+            try {
+              ensureRangeIncludes(sheet, row.rowNumber, 6);
+              await writeExcel(() => {
+                setCell(sheet, row.rowNumber, 'D', `登录失败：worker异常 ${error.message || error}，已跳过继续下一行`);
+                setCell(sheet, row.rowNumber, 'E', new Date().toLocaleString('zh-CN', { hour12: false }));
+                setCell(sheet, row.rowNumber, 'G', '');
+              }, `worker ${workerIndex + 1} fatal row ${row.rowNumber}`);
+            } catch (writeError) {
+              console.log(`[Batch] worker ${workerIndex + 1} row ${row.rowNumber} fatal error status write failed, keep running: ${writeError && writeError.stack ? writeError.stack : writeError}`);
+            }
+          }
+          await closeReusableSession(reusableSession, options, `worker ${workerIndex + 1} row fatal error`);
+          reusableSession = null;
+        }
       }
     } finally {
       await closeReusableSession(reusableSession, options, `worker ${workerIndex + 1} done`);
     }
   };
 
-  await Promise.all(Array.from({ length: workerCount }, (_, index) => runWorker(index)));
+  const workerResults = await Promise.allSettled(Array.from({ length: workerCount }, (_, index) => runWorker(index)));
+  const workerFailures = workerResults.filter(result => result.status === 'rejected');
+  if (workerFailures.length) {
+    workerFailures.forEach((failure, index) => {
+      const reason = failure.reason && failure.reason.stack ? failure.reason.stack : String(failure.reason);
+      console.log(`[Batch] worker promise rejected ${index + 1}/${workerFailures.length}, keep main process successful: ${reason}`);
+    });
+  }
 
   console.log('[Batch] all done.');
 }
