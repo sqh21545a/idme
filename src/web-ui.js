@@ -137,11 +137,16 @@ function maskProxy(proxy) {
 }
 
 function defaultStatus() {
+  const exitCode = lastRun ? lastRun.exitCode : null;
+  const signal = lastRun ? lastRun.signal || '' : '';
   return {
     running: Boolean(running),
     pid: running ? running.pid : null,
     lastRun,
     logCount: logs.length,
+    exitCode,
+    signal,
+    exitText: running ? '运行中' : lastRun && lastRun.endedAt ? `已退出 code=${exitCode}${signal ? ` signal=${signal}` : ''}` : '未运行',
   };
 }
 
@@ -188,11 +193,21 @@ function startProcess(script, args, options = {}, runType = 'single') {
     String(chunk).split(/\r?\n/).forEach(line => pushLog(line ? `[stderr] ${line}` : ''));
   });
   child.on('exit', (code, signal) => {
-    pushLog(`[WebUI] process exited code=${code} signal=${signal || ''}`);
+    const exitCode = code === null || code === undefined ? '' : code;
+    const exitSignal = signal || '';
+    pushLog(`[WebUI] process exited code=${exitCode} signal=${exitSignal}`);
+    if (exitCode !== 0 || exitSignal) {
+      pushLog(`[WebUI] process ended unexpectedly, last exit code=${exitCode || 'null'}${exitSignal ? ` signal=${exitSignal}` : ''}`);
+    } else {
+      pushLog('[WebUI] process completed normally, exit code=0');
+    }
     if (lastRun) {
       lastRun.endedAt = new Date().toISOString();
       lastRun.exitCode = code;
-      lastRun.signal = signal || '';
+      lastRun.signal = exitSignal;
+      lastRun.exitText = exitCode === 0 && !exitSignal
+        ? '正常结束 code=0'
+        : `异常退出 code=${exitCode || 'null'}${exitSignal ? ` signal=${exitSignal}` : ''}`;
     }
     if (running === child) running = null;
   });

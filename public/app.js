@@ -59,8 +59,8 @@ function batchFormDataToOptions() {
 function renderStatus(status) {
   const running = Boolean(status && status.running);
   statusDot.classList.toggle('running', running);
-  statusText.textContent = running ? '运行中' : '未运行';
-  pidText.textContent = running ? `PID: ${status.pid}` : 'PID: -';
+  statusText.textContent = running ? '运行中' : (status && status.exitText ? status.exitText : '未运行');
+  pidText.textContent = running ? `PID: ${status.pid}` : `PID: -${status && status.exitCode !== null && status.exitCode !== undefined ? ` / 上次退出码: ${status.exitCode}` : ''}`;
 }
 
 function appendLocalLog(text) {
@@ -134,7 +134,7 @@ batchForm.addEventListener('submit', async event => {
 stopBtn.addEventListener('click', async () => {
   try {
     const result = await api('/api/stop', { method: 'POST', body: '{}' });
-    appendLocalLog(result.stopped ? `已请求停止 PID ${result.pid}` : '当前没有运行进程');
+    appendLocalLog(result.stopped ? `已请求停止 PID ${result.pid}` : `当前没有运行进程${result.status && result.status.exitText ? `，${result.status.exitText}` : ''}`);
     renderStatus(result.status);
   } catch (error) {
     appendLocalLog(`停止失败：${error.message}`);

@@ -229,15 +229,31 @@ function httpGetText(url, timeoutMs = 30000, redirectsLeft = 3) {
 }
 
 async function refreshProxyIp(options, reason) {
-  if (!options.proxyRefreshUrl) return false;
+  if (!options.proxyRefreshUrl) return { success: false, limited: false, body: '', error: 'proxy refresh url empty' };
   console.log(`[Batch] refresh proxy IP start (${reason})`);
   const body = await httpGetText(options.proxyRefreshUrl);
-  console.log(`[Batch] refresh proxy IP done (${reason}): ${body.slice(0, 300).replace(/\s+/g, ' ') || 'empty response'}`);
+  const normalizedBody = body.slice(0, 300).replace(/\s+/g, ' ') || 'empty response';
+  console.log(`[Batch] refresh proxy IP done (${reason}): ${normalizedBody}`);
+  const limited = /too_many_requests|稍后再试|请求过于频繁|频繁|rate.?limit/i.test(body);
+  if (limited) {
+    console.log(`[Batch] refresh proxy IP limited (${reason}), skip retry for current row`);
+    return { success: false, limited: true, body, error: normalizedBody };
+  }
   if (options.proxyRefreshWait > 0) {
     console.log(`[Batch] wait ${options.proxyRefreshWait}s after proxy refresh`);
     await sleep(options.proxyRefreshWait * 1000);
   }
-  return true;
+  return { success: true, limited: false, body, error: '' };
+}
+
+async function safeRunAccount(row, options, label) {
+  try {
+    return await runAccount(row, options);
+  } catch (error) {
+    const message = error && error.stack ? error.stack : String(error);
+    console.log(`[Batch] row ${row.rowNumber} ${label} error, skip retry and continue: ${message}`);
+    return { success: false, status: `登录失败：${label}异常 ${error.message || error}，已跳过继续下一行`, mfaLabel: '' };
+  }
 }
 
 function generateWindowsUserAgent(seedInput) {
@@ -611,11 +627,18 @@ function runAccount(row, options) {
 
     let output = '';
     let timedOut = false;
-    const child = spawn(process.execPath, args, {
-      cwd: process.cwd(),
-      stdio: ['ignore', 'pipe', 'pipe'],
-      windowsHide: false,
-    });
+    let child;
+    try {
+      child = spawn(process.execPath, args, {
+        cwd: process.cwd(),
+        stdio: ['ignore', 'pipe', 'pipe'],
+        windowsHide: false,
+      });
+    } catch (error) {
+      console.log(`[Batch] row ${row.rowNumber} spawn failed: ${error.message}`);
+      resolve({ success: false, status: `登录失败：启动子进程异常 ${error.message}`, mfaLabel: '' });
+      return;
+    }
 
     let timer;
     const resetTimer = () => {
@@ -639,6 +662,11 @@ function runAccount(row, options) {
       output += text;
       process.stderr.write(text);
       resetTimer();
+    });
+    child.on('error', error => {
+      clearTimeout(timer);
+      console.log(`[Batch] row ${row.rowNumber} child process error: ${error.message}`);
+      resolve({ success: false, status: `登录失败：子进程异常 ${error.message}`, mfaLabel: '' });
     });
     child.on('exit', (code, signal) => {
       clearTimeout(timer);
@@ -720,10 +748,14 @@ async function main() {
   let lastGoodProxy = '';
   let proxyRefreshChain = Promise.resolve();
   const refreshProxyForFail = reason => {
-    if (!options.proxyRefreshUrl || !options.proxyRefreshOnFail) return Promise.resolve(false);
+    if (!options.proxyRefreshUrl || !options.proxyRefreshOnFail) {
+      return Promise.resolve({ success: false, limited: false, body: '', error: 'proxy refresh disabled' });
+    }
     proxyRefreshChain = proxyRefreshChain.then(() => refreshProxyIp(options, reason)).catch(error => {
-      console.log(`[Batch] refresh proxy IP failed (${reason}): ${error.message}`);
-      return false;
+      const message = error && error.message ? error.message : String(error);
+      const limited = /too_many_requests|稍后再试|请求过于频繁|频繁|rate.?limit/i.test(message);
+      console.log(`[Batch] refresh proxy IP failed (${reason}): ${message}`);
+      return { success: false, limited, body: '', error: message };
     });
     return proxyRefreshChain;
   };
@@ -793,8 +825,12 @@ async function main() {
         });
         await closeReusableSession(reusableSession, options, 'network failed before proxy refresh');
         reusableSession = null;
-        await refreshProxyForFail(`row ${row.rowNumber} network failed`);
-        result = await runAccount({ ...row, proxy: finalProxy, userAgent: finalUserAgent, environmentId: retryEnvironmentId }, { ...options, freshProfile: true });
+        const refreshResult = await refreshProxyForFail(`row ${row.rowNumber} network failed`);
+        if (refreshResult.limited) {
+          result = { success: false, status: `登录失败：代理刷新过于频繁，已跳过当前账号（${refreshResult.error || 'too_many_requests'}）`, mfaLabel: '' };
+        } else {
+          result = await safeRunAccount({ ...row, proxy: finalProxy, userAgent: finalUserAgent, environmentId: retryEnvironmentId }, { ...options, freshProfile: true }, '网络失败后重试');
+        }
       }
       if (result.networkOpenFailed && lastGoodProxy && lastGoodProxy !== rowProxy) {
         const retryEnvironmentId = randomToken();
@@ -809,7 +845,7 @@ async function main() {
           setCell(sheet, row.rowNumber, 'F', finalUserAgent || 'browser default');
           setCell(sheet, row.rowNumber, 'G', '');
         });
-        result = await runAccount({ ...row, proxy: lastGoodProxy, userAgent: finalUserAgent, environmentId: retryEnvironmentId }, { ...options, freshProfile: true });
+        result = await safeRunAccount({ ...row, proxy: lastGoodProxy, userAgent: finalUserAgent, environmentId: retryEnvironmentId }, { ...options, freshProfile: true }, '最近成功代理重试');
         if (result.networkOpenFailed) {
           result = { ...result, status: '登录失败：当前代理和最近成功代理均打开失败' };
         }
@@ -830,8 +866,12 @@ async function main() {
         });
         await closeReusableSession(reusableSession, options, 'browser_blocked before proxy refresh');
         reusableSession = null;
-        await refreshProxyForFail(`row ${row.rowNumber} browser_blocked`);
-        result = await runAccount({ ...row, proxy: finalProxy, userAgent: finalUserAgent, environmentId: retryEnvironmentId }, { ...options, freshProfile: true, randomUserAgent: true });
+        const refreshResult = await refreshProxyForFail(`row ${row.rowNumber} browser_blocked`);
+        if (refreshResult.limited) {
+          result = { success: false, status: `登录失败：代理刷新过于频繁，已跳过当前账号（${refreshResult.error || 'too_many_requests'}）`, mfaLabel: '' };
+        } else {
+          result = await safeRunAccount({ ...row, proxy: finalProxy, userAgent: finalUserAgent, environmentId: retryEnvironmentId }, { ...options, freshProfile: true, randomUserAgent: true }, 'browser_blocked 后重试');
+        }
         if (result.browserBlocked) {
           let safeProxy = noBrowserBlockedProxyPool.next(finalProxy) || (lastGoodProxy !== finalProxy ? lastGoodProxy : '');
           if (safeProxy) {
@@ -847,7 +887,7 @@ async function main() {
                 setCell(sheet, row.rowNumber, 'F', finalUserAgent);
                 setCell(sheet, row.rowNumber, 'G', '');
               });
-              result = await runAccount({ ...row, proxy: safeProxy, userAgent: finalUserAgent, environmentId: safeEnvironmentId }, { ...options, freshProfile: true, randomUserAgent: true });
+              result = await safeRunAccount({ ...row, proxy: safeProxy, userAgent: finalUserAgent, environmentId: safeEnvironmentId }, { ...options, freshProfile: true, randomUserAgent: true }, `未 browser_blocked 代理重试 ${safeAttempt}/3`);
               if (result.browserBlocked) safeProxy = noBrowserBlockedProxyPool.next(finalProxy) || safeProxy;
             }
             if (result.browserBlocked) {
