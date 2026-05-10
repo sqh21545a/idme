@@ -279,6 +279,11 @@ function ensureRangeIncludes(sheet, rowNumber, columnIndex) {
   sheet['!ref'] = XLSX.utils.encode_range(range);
 }
 
+function isFilledLoginStatus(status) {
+  const text = String(status || '').trim();
+  return Boolean(text) && !/^运行中\b/i.test(text);
+}
+
 function buildRows(sheet, options) {
   const hasHeader = detectHeader(sheet);
   const firstDataRow = hasHeader ? 2 : 1;
@@ -286,6 +291,7 @@ function buildRows(sheet, options) {
   const start = options.startRow > 0 ? Math.max(options.startRow, firstDataRow) : firstDataRow;
   const end = options.endRow > 0 ? Math.min(options.endRow, lastRow) : lastRow;
   const rows = [];
+  let skippedByStatus = 0;
 
   if (hasHeader) {
     setCell(sheet, 1, 'C', cellValue(sheet, 1, 'C') || 'HTTP Proxy');
@@ -300,11 +306,16 @@ function buildRows(sheet, options) {
     const password = cellValue(sheet, rowNumber, 'B');
     const proxy = cellValue(sheet, rowNumber, 'C');
     const status = cellValue(sheet, rowNumber, 'D');
-    if (!email && !password && !proxy) continue;
+    if (!email && !password && !proxy && !status) continue;
+    if (isFilledLoginStatus(status)) {
+      skippedByStatus += 1;
+      console.log(`[Batch] row ${rowNumber} skipped: 登录状态已有内容：${status}`);
+      continue;
+    }
     rows.push({ rowNumber, email, password, proxy, status });
   }
 
-  return { rows, hasHeader };
+  return { rows, hasHeader, skippedByStatus };
 }
 
 function classifyOutput(output, exitCode, signal, timedOut) {
@@ -681,9 +692,10 @@ async function main() {
   const sheet = workbook.Sheets[sheetName];
   if (!sheet) throw new Error(`找不到工作表：${sheetName}`);
 
-  const { rows } = buildRows(sheet, options);
+  const { rows, skippedByStatus } = buildRows(sheet, options);
   console.log(`[Batch] sheet: ${sheetName}`);
   console.log(`[Batch] rows: ${rows.length}`);
+  console.log(`[Batch] skipped rows with existing login status: ${skippedByStatus}`);
 
   if (!rows.length) {
     console.log('[Batch] 没有可运行的账号行。A列=email，B列=password，C列=HTTP Proxy。');
