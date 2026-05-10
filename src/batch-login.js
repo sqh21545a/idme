@@ -295,6 +295,42 @@ function ensureRangeIncludes(sheet, rowNumber, columnIndex) {
   sheet['!ref'] = XLSX.utils.encode_range(range);
 }
 
+function isExcelWriteLockError(error) {
+  const code = String(error && error.code ? error.code : '').toUpperCase();
+  const message = String(error && error.message ? error.message : error || '');
+  return ['UNKNOWN', 'EPERM', 'EBUSY', 'EACCES', 'ENOENT'].includes(code)
+    || /UNKNOWN|EPERM|EBUSY|EACCES|permission denied|being used by another process|open .*\.xlsx/i.test(message);
+}
+
+async function safeWriteWorkbook(workbook, excelPath, label = 'excel write') {
+  const attempts = [1000, 2000, 3000, 5000, 8000];
+  let lastError = null;
+
+  for (let attempt = 1; attempt <= attempts.length + 1; attempt += 1) {
+    try {
+      XLSX.writeFile(workbook, excelPath);
+      if (attempt > 1) console.log(`[Batch] ${label} succeeded after retry ${attempt}/${attempts.length + 1}`);
+      return true;
+    } catch (error) {
+      lastError = error;
+      const message = error && error.message ? error.message : String(error);
+      const retryable = isExcelWriteLockError(error);
+      if (!retryable || attempt > attempts.length) {
+        console.log(`[Batch] ${label} failed, keep running without exiting: ${message}`);
+        console.log(`[Batch] 请关闭正在打开的 Excel/WPS 文件后继续运行：${excelPath}`);
+        return false;
+      }
+      const waitMs = attempts[attempt - 1];
+      console.log(`[Batch] ${label} failed ${attempt}/${attempts.length + 1}: ${message}`);
+      console.log(`[Batch] Excel 文件可能被占用，等待 ${Math.round(waitMs / 1000)}s 后重试：${excelPath}`);
+      await sleep(waitMs);
+    }
+  }
+
+  console.log(`[Batch] ${label} failed, keep running without exiting: ${lastError && lastError.message ? lastError.message : lastError}`);
+  return false;
+}
+
 function isFilledLoginStatus(status) {
   const text = String(status || '').trim();
   return Boolean(text) && !/^运行中\b/i.test(text);
@@ -738,10 +774,14 @@ async function main() {
 
   const queue = rows.slice();
   let writeChain = Promise.resolve();
-  const writeExcel = async update => {
-    writeChain = writeChain.then(() => {
+  const writeExcel = async (update, label = 'excel write') => {
+    writeChain = writeChain.then(async () => {
       update();
-      XLSX.writeFile(workbook, excelPath);
+      await safeWriteWorkbook(workbook, excelPath, label);
+    }).catch(error => {
+      const message = error && error.message ? error.message : String(error);
+      console.log(`[Batch] ${label} failed before workbook write, keep running without exiting: ${message}`);
+      return false;
     });
     return writeChain;
   };
