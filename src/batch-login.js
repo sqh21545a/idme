@@ -381,17 +381,18 @@ function classifyOutput(output, exitCode, signal, timedOut) {
   if (mfaMatch) {
     try {
       const choices = JSON.parse(mfaMatch[1]);
-      const setupChoice = Array.isArray(choices)
-        ? choices.find(choice => choice && !choice.error && choice.name === 'multifactor[setup]' && choice.label)
-        : null;
-      const phoneChoice = Array.isArray(choices)
-        ? choices.find(choice => choice && !choice.error && /\(\*\*\*\)|\*+[- )]*\d+/.test(choice.label || ''))
-        : null;
-      const firstChoice = setupChoice || phoneChoice || (Array.isArray(choices)
-        ? choices.find(choice => choice && !choice.error && (choice.label || choice.description))
-        : null);
-      hasMfaChoice = Boolean(firstChoice);
-      mfaLabel = firstChoice ? (firstChoice.label || firstChoice.description || '') : '';
+      const validChoices = Array.isArray(choices)
+        ? choices.filter(choice => choice && !choice.error)
+        : [];
+      const setupChoices = validChoices.filter(choice => choice.name === 'multifactor[setup]' && choice.label);
+      const phoneChoices = validChoices.filter(choice => /\(\*\*\*\)|\*+[- )]*\d+/.test(choice.label || ''));
+      const fallbackChoices = validChoices.filter(choice => choice.label || choice.description);
+      const selectedChoices = setupChoices.length ? setupChoices : phoneChoices.length ? phoneChoices : fallbackChoices;
+      const labels = selectedChoices
+        .map(choice => choice.label || choice.description || '')
+        .filter(Boolean);
+      hasMfaChoice = labels.length > 0;
+      mfaLabel = labels.join(', ');
     } catch (_) {}
   }
 
